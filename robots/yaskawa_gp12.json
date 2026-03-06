@@ -1,0 +1,65 @@
+[
+    {
+        "i": 0,
+        "d": 0,
+        "a": 0,
+        "alpha": 0,
+        "thetaOffset": 0,
+        "thetaMin": -170,
+        "thetaMax": 170
+    },
+    {
+        "i": 1,
+        "d": 0,
+        "a": 155,
+        "alpha": -90,
+        "thetaOffset": -90,
+        "thetaMin": -90,
+        "thetaMax": 155
+    },
+    {
+        "i": 2,
+        "d": 0,
+        "a": 614,
+        "alpha": -180,
+        "thetaOffset": 0,
+        "thetaMin": -85,
+        "thetaMax": 150
+    },
+    {
+        "i": 3,
+        "d": -640,
+        "a": 200,
+        "alpha": -90,
+        "thetaOffset": 0,
+        "thetaMin": -200,
+        "thetaMax": 200
+    },
+    {
+        "i": 4,
+        "d": 0,
+        "a": 0,
+        "alpha": 90,
+        "thetaOffset": 0,
+        "thetaMin": -150,
+        "thetaMax": 150
+    },
+    {
+        "i": 5,
+        "d": 0,
+        "a": 0,
+        "alpha": -90,
+        "thetaOffset": 0,
+        "thetaMin": -455,
+        "thetaMax": 455
+    },
+    {
+        "i": 6,
+        "d": 100,
+        "a": 0,
+        "alpha": 180,
+        "thetaOffset": 0,
+        "thetaMin": -455,
+        "thetaMax": 455
+    }
+]
