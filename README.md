@@ -14,7 +14,7 @@ One analytical IK solver for *any* 6-DOF robot with a spherical wrist. Instead o
 | Speedup | **~100-200x** | baseline |
 | Solutions returned | **All 8 configs** | 1 config |
 
-Tested on 10,000 random configurations per robot, zero failures across all 5 robot types.
+Run `uv run --group benchmark python examples/benchmark.py` to reproduce these results with actual measured values on your machine.
 
 ### Accuracy (10,000 trials per robot)
 
@@ -54,7 +54,7 @@ Tested on 10,000 random configurations per robot, zero failures across all 5 rob
 ```bash
 git clone https://github.com/your-username/dh-transform-ik.git
 cd dh-transform-ik
-pip install numpy
+uv sync
 ```
 
 ```python
@@ -155,6 +155,7 @@ Fields: `alpha` (deg), `a` (mm), `thetaOffset` (deg), `d` (mm), `thetaMin`/`thet
 
 ```
 dh-transform-ik/
+  pyproject.toml         # Project config & dependencies (uv)
   dh_transform_ik/
     __init__.py          # Public API
     dh.py                # DHParam class, FK, utilities
@@ -164,7 +165,7 @@ dh-transform-ik/
   examples/
     basic_usage.py       # Simple IK solve + verification
     all_robots.py        # All 5 robots demonstrated
-    benchmark.py         # Reproduce paper Tables 3 & 4
+    benchmark.py         # Reproduce paper Tables 3 & 4 (+ numerical comparison)
   tests/
     test_ik.py           # FK -> IK -> FK roundtrip tests
 ```
@@ -204,7 +205,7 @@ List of configuration names: `['FUN', 'FUF', 'FDN', 'FDF', 'BUN', 'BUF', 'BDN', 
 ## Running Tests
 
 ```bash
-python tests/test_ik.py
+uv run python tests/test_ik.py
 ```
 
 Expected output:
@@ -225,8 +226,25 @@ Expected output:
 
 ## Requirements
 
-- Python 3.7+
-- NumPy
+- Python 3.9+
+- [uv](https://docs.astral.sh/uv/) (recommended package manager)
+- NumPy (installed automatically by `uv sync`)
+
+### Running Examples
+
+```bash
+# Basic usage
+uv run python examples/basic_usage.py
+
+# All robots demo
+uv run python examples/all_robots.py
+
+# Benchmark (analytical only)
+uv run python examples/benchmark.py
+
+# Benchmark with numerical comparison (installs roboticstoolbox)
+uv run --group benchmark python examples/benchmark.py
+```
 
 ## Citation
 

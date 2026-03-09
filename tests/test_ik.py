@@ -13,7 +13,7 @@ import random
 
 import numpy as np
 
-# Add parent directory to path so we can import the package
+# Add parent directory to path (not needed if installed via `uv sync`)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from dh_transform_ik import (

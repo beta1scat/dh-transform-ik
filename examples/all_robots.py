@@ -13,7 +13,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # not needed with uv
 
 from dh_transform_ik import (
     load_robot,

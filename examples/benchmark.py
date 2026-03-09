@@ -1,12 +1,16 @@
 """
 Benchmark: Reproduce the accuracy and speed results from the paper.
 
-Tests 10,000 random FK -> IK -> FK roundtrips for each robot,
-measuring success rate, accuracy, and computation time.
+Tests FK -> IK -> FK roundtrips for each robot, measuring success rate,
+accuracy, and computation time for BOTH the analytical method (this package)
+and the numerical Levenberg-Marquardt method (roboticstoolbox).
 
 Results can be compared with Table 3 and Table 4 in:
     Niu et al., "A General Framework for the Analytical Inverse Kinematics
     Solution of Industrial Robots", Proc. IMechE Part C, 2025.
+
+Requirements:
+    uv run --group benchmark python examples/benchmark.py
 """
 
 import math
@@ -17,7 +21,7 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # not needed with uv
 
 from dh_transform_ik import (
     load_robot,
@@ -27,6 +31,14 @@ from dh_transform_ik import (
     transform_dh,
     CONFIGS,
 )
+
+try:
+    import roboticstoolbox as rtb
+    from spatialmath import SE3
+
+    HAS_RTB = True
+except ImportError:
+    HAS_RTB = False
 
 robots_dir = os.path.join(os.path.dirname(__file__), "..", "robots")
 template = load_robot(os.path.join(robots_dir, "fanuc_lr_mate_200id.json"))
@@ -39,7 +51,8 @@ ROBOTS = {
     "Estun ER8-720-MI": "estun_er8_720mi.json",
 }
 
-NUM_TRIALS = 10000
+NUM_TRIALS_ANALYTICAL = 10000
+NUM_TRIALS_NUMERICAL = 200  # Numerical methods are slow; 200 trials is enough
 TOLERANCE = 1e-3  # mm-level tolerance for the 4x4 matrix comparison
 
 
@@ -63,8 +76,55 @@ def random_joints(dh_list):
     return angles
 
 
-def benchmark_robot(robot_name, robot_file):
-    """Run the full benchmark for one robot."""
+def build_rtb_robot(dh_list):
+    """Build a roboticstoolbox DHRobot from our DH parameter list.
+
+    Args:
+        dh_list: List of DHParam objects (7 entries: 6 joints + end-effector).
+
+    Returns:
+        rtb.robot.DHRobot instance.
+    """
+    links = []
+    for i in range(6):
+        dh = dh_list[i]
+        links.append(
+            rtb.RevoluteMDH(
+                alpha=math.radians(dh.alpha),
+                a=dh.a / 1000.0,  # mm -> m
+                offset=math.radians(dh.theta_offset),
+                d=dh.d / 1000.0,  # mm -> m
+            )
+        )
+    # End-effector (7th entry) as tool transform
+    ee = dh_list[6]
+    al_r = math.radians(ee.alpha)
+    t_r = math.radians(ee.theta_offset)
+    tool_T = np.array(
+        [
+            [math.cos(t_r), -math.sin(t_r), 0.0, ee.a / 1000.0],
+            [
+                math.sin(t_r) * math.cos(al_r),
+                math.cos(t_r) * math.cos(al_r),
+                -math.sin(al_r),
+                -ee.d / 1000.0 * math.sin(al_r),
+            ],
+            [
+                math.sin(t_r) * math.sin(al_r),
+                math.cos(t_r) * math.sin(al_r),
+                math.cos(al_r),
+                ee.d / 1000.0 * math.cos(al_r),
+            ],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    robot = rtb.DHRobot(links, tool=SE3(tool_T), name="benchmark_robot")
+    return robot
+
+
+def benchmark_analytical(robot_name, robot_file):
+    """Run the analytical IK benchmark for one robot."""
     robot_dh = load_robot(os.path.join(robots_dir, robot_file))
     transformed = transform_dh(template, robot_dh)
 
@@ -72,7 +132,7 @@ def benchmark_robot(robot_name, robot_file):
     total_error = 0.0
     total_time = 0.0
 
-    for _ in range(NUM_TRIALS):
+    for _ in range(NUM_TRIALS_ANALYTICAL):
         q_deg = random_joints(robot_dh)
         target = compute_fk(robot_dh, q_deg)
 
@@ -95,52 +155,176 @@ def benchmark_robot(robot_name, robot_file):
                 break
 
     mean_error = total_error / max(successes, 1)
-    avg_time_us = total_time / NUM_TRIALS * 1e6
+    avg_time_us = total_time / NUM_TRIALS_ANALYTICAL * 1e6
 
-    return successes, mean_error, avg_time_us
+    return successes, NUM_TRIALS_ANALYTICAL, mean_error, avg_time_us
+
+
+def benchmark_numerical(robot_name, robot_file):
+    """Run the numerical IK (Levenberg-Marquardt) benchmark for one robot.
+
+    Args:
+        robot_name: Display name of the robot.
+        robot_file: JSON filename in robots/ directory.
+
+    Returns:
+        (successes, total_trials, mean_error, avg_time_us)
+    """
+    robot_dh = load_robot(os.path.join(robots_dir, robot_file))
+    rtb_robot = build_rtb_robot(robot_dh)
+
+    successes = 0
+    total_error = 0.0
+    total_time = 0.0
+
+    for _ in range(NUM_TRIALS_NUMERICAL):
+        # Generate random joint angles (radians) within limits
+        q_rad = np.array(
+            [
+                math.radians(
+                    random.uniform(
+                        robot_dh[i].theta_min
+                        + (robot_dh[i].theta_max - robot_dh[i].theta_min) * 0.05,
+                        robot_dh[i].theta_max
+                        - (robot_dh[i].theta_max - robot_dh[i].theta_min) * 0.05,
+                    )
+                )
+                for i in range(6)
+            ]
+        )
+
+        # FK using roboticstoolbox (returns SE3, positions in meters)
+        ee_se3 = rtb_robot.fkine(q_rad)
+
+        # Numerical IK (Levenberg-Marquardt)
+        t0 = time.perf_counter()
+        sol = rtb_robot.ikine_LM(ee_se3)
+        t1 = time.perf_counter()
+        total_time += t1 - t0
+
+        # Check solution
+        if sol.success:
+            fk_check = rtb_robot.fkine(sol.q)
+            error_matrix = fk_check.A - ee_se3.A
+            error = np.mean(np.abs(error_matrix))
+            if error < TOLERANCE:
+                successes += 1
+                total_error += error
+
+    mean_error = total_error / max(successes, 1)
+    avg_time_us = total_time / NUM_TRIALS_NUMERICAL * 1e6
+
+    return successes, NUM_TRIALS_NUMERICAL, mean_error, avg_time_us
 
 
 def main():
     random.seed(42)
     np.random.seed(42)
 
-    print("=" * 78)
-    print(f"  Benchmark: {NUM_TRIALS} FK -> IK -> FK roundtrips per robot")
-    print("=" * 78)
+    print("=" * 80)
+    print(
+        f"  Analytical IK Benchmark: "
+        f"{NUM_TRIALS_ANALYTICAL} FK -> IK -> FK roundtrips per robot"
+    )
+    print("=" * 80)
     print()
 
-    # Accuracy table (comparable to Table 3 in the paper)
-    print("Accuracy Results:")
-    print(f"{'Robot':<25} {'Success':>10} {'Rate':>8} {'Mean Error':>14}")
-    print("-" * 60)
+    # ------------------------------------------------------------------
+    # Analytical method benchmark
+    # ------------------------------------------------------------------
+    print("Analytical Method Results:")
+    print(
+        f"{'Robot':<25} {'Success':>12} {'Rate':>8} {'Mean Error':>14} {'Avg Time':>12}"
+    )
+    print("-" * 75)
 
-    results = {}
+    analytical_results = {}
     for robot_name, robot_file in ROBOTS.items():
-        successes, mean_error, avg_time = benchmark_robot(robot_name, robot_file)
-        results[robot_name] = (successes, mean_error, avg_time)
-        rate = successes / NUM_TRIALS * 100
+        successes, trials, mean_error, avg_time = benchmark_analytical(
+            robot_name, robot_file
+        )
+        analytical_results[robot_name] = (successes, trials, mean_error, avg_time)
+        rate = successes / trials * 100
         print(
-            f"{robot_name:<25} {successes:>7}/{NUM_TRIALS}  {rate:6.1f}%  {mean_error:14.2e}"
+            f"{robot_name:<25} {successes:>7}/{trials}  {rate:6.1f}%  "
+            f"{mean_error:14.2e}  {avg_time:9.1f} us"
         )
 
-    # Speed table (comparable to Table 4 in the paper)
-    print()
-    print("Speed Results:")
-    print(f"{'Robot':<25} {'Avg Time (us)':>15} {'Calls/sec':>12}")
-    print("-" * 55)
+    # ------------------------------------------------------------------
+    # Numerical method benchmark (Levenberg-Marquardt)
+    # ------------------------------------------------------------------
+    if not HAS_RTB:
+        print()
+        print("=" * 80)
+        print("  Numerical IK benchmark SKIPPED (roboticstoolbox not installed)")
+        print("  Install with: uv sync --group benchmark")
+        print("=" * 80)
+    else:
+        print()
+        print("=" * 80)
+        print(
+            f"  Numerical IK Benchmark (Levenberg-Marquardt): "
+            f"{NUM_TRIALS_NUMERICAL} trials per robot"
+        )
+        print("=" * 80)
+        print()
+        print(
+            f"{'Robot':<25} {'Success':>12} {'Rate':>8} "
+            f"{'Mean Error':>14} {'Avg Time':>12}"
+        )
+        print("-" * 75)
 
-    for robot_name, (_, _, avg_time) in results.items():
-        calls_per_sec = 1e6 / avg_time
-        print(f"{robot_name:<25} {avg_time:13.1f}   {calls_per_sec:10,.0f}")
+        numerical_results = {}
+        for robot_name, robot_file in ROBOTS.items():
+            successes, trials, mean_error, avg_time = benchmark_numerical(
+                robot_name, robot_file
+            )
+            numerical_results[robot_name] = (successes, trials, mean_error, avg_time)
+            rate = successes / trials * 100
+            print(
+                f"{robot_name:<25} {successes:>5}/{trials}  {rate:6.1f}%  "
+                f"{mean_error:14.2e}  {avg_time:9.1f} us"
+            )
 
+        # Print comparison summary
+        print()
+        print("--- Comparison: Analytical vs Numerical (LM) ---")
+        print(f"{'Robot':<25} {'Analytical':>12} {'Numerical':>12} {'Speedup':>10}")
+        print("-" * 62)
+        for robot_name in ROBOTS:
+            a_time = analytical_results[robot_name][3]
+            n_time = numerical_results[robot_name][3]
+            speedup = n_time / a_time if a_time > 0 else float("inf")
+            print(
+                f"{robot_name:<25} {a_time:9.1f} us  {n_time:9.1f} us  {speedup:8.0f}x"
+            )
+
+    # ------------------------------------------------------------------
+    # Overall summary
+    # ------------------------------------------------------------------
     print()
-    print("=" * 78)
-    print("Note: The paper reports ~200x speedup over numerical methods.")
-    print("Typical numerical IK (LM method) takes ~5-10 ms per call.")
-    print(
-        f"This analytical method: ~{sum(v[2] for v in results.values()) / len(results):.0f} us per call."
+    print("=" * 80)
+    print("  Summary")
+    print("=" * 80)
+    avg_analytical = sum(v[3] for v in analytical_results.values()) / len(
+        analytical_results
     )
-    print("=" * 78)
+    print(f"Analytical method average: {avg_analytical:.1f} us/call")
+
+    if HAS_RTB and numerical_results:  # type: ignore[possibly-undefined]
+        avg_numerical = sum(v[3] for v in numerical_results.values()) / len(
+            numerical_results
+        )
+        overall_speedup = avg_numerical / avg_analytical
+        print(
+            f"Numerical (LM) average:   {avg_numerical:.1f} us/call  "
+            f"(speedup: {overall_speedup:.0f}x)"
+        )
+    else:
+        print("Install roboticstoolbox to see numerical method comparison:")
+        print("  uv sync --group benchmark")
+
+    print("=" * 80)
 
 
 if __name__ == "__main__":
