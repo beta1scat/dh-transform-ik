@@ -1,9 +1,8 @@
-"""
-Demonstrate IK solving for all 5 supported robots.
+"""Demonstrate IK solving for all five included same-configuration models.
 
 Shows the FK -> IK -> FK roundtrip for each robot with a random joint
-configuration, verifying that the analytical IK produces machine-precision
-solutions for all robot types.
+configuration, verifying that the Fanuc-template analytical IK produces
+machine-precision roundtrip solutions for these spherical-wrist models.
 """
 
 import math

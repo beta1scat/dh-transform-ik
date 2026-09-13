@@ -50,7 +50,7 @@ print()
 # ---------------------------------------------------------------
 solutions = solve_ik(target_pose, template, robot)
 
-print("IK Solutions (8 configurations):")
+print("IK solutions (8 theoretical configuration slots):")
 print(
     f"{'Config':<6} {'theta1':>8} {'theta2':>8} {'theta3':>8} {'theta4':>8} {'theta5':>8} {'theta6':>8}  Valid"
 )

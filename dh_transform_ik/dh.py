@@ -32,7 +32,7 @@ class DHParam:
         theta_max:    Maximum joint angle limit (degrees).
         is_co_orient: Whether the Z-axis is co-oriented with the template frame.
                       Used after DH transformation to track axis direction.
-        zero_offset:  Angular offset between the template and arbitrary robot's
+        zero_offset:  Angular offset between the template and target robot's
                       zero position (degrees). Used for joint angle mapping.
     """
 

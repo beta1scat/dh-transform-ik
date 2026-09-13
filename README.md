@@ -1,8 +1,10 @@
 # dh-transform-ik
 
-**A General Framework for Analytical Inverse Kinematics of 6-DOF Industrial Robots**
+**A General Framework for Analytical Inverse Kinematics Based on D-H Parameter Templates**
 
-One analytical IK solver for *any* 6-DOF robot with a spherical wrist. Instead of deriving a custom IK solver for each robot, supply the robot's Modified D-H parameters and get all 8 joint configurations in microseconds.
+The framework organizes analytical inverse kinematics by mechanical configuration. Each configuration family needs a D-H template and an analytical solver derived for that template; compatible target models can reuse the solver when their Modified D-H representations satisfy the framework's isomorphism criteria.
+
+This repository implements one such family: the 6R spherical-wrist configuration represented by the Fanuc LR Mate 200iD template. It does not contain a UR-type non-spherical-wrist solver or runtime template/solver dispatch. Extending the framework to a UR-type or another configuration requires a separate analytical derivation, implementation, and validation; supplying a different JSON template alone is not sufficient.
 
 ## Key Results
 
@@ -12,7 +14,7 @@ One analytical IK solver for *any* 6-DOF robot with a spherical wrist. Instead o
 | Mean error | **~1e-14** | ~1e-4 |
 | Speed | **~50 us/call** | ~5-10 ms/call |
 | Speedup | **~100-200x** | baseline |
-| Solutions returned | **All 8 configs** | 1 config |
+| Solutions returned | **8 named candidate slots**; unreachable branches are `NaN` | 1 config |
 
 Run `uv run --group benchmark python examples/benchmark.py` to reproduce these results with actual measured values on your machine.
 
@@ -32,22 +34,22 @@ Run `uv run --group benchmark python examples/benchmark.py` to reproduce these r
                     DH Transform                    Analytical IK
                     (Algorithm 1)                   (closed-form)
                                                     
-  Robot's MDH   ──────────────>  Template MDH  ──────────────>  8 Solutions
+  Robot's MDH   ──────────────>  Template MDH  ──────────────>  8 Candidate Slots
   Parameters         once           Space           per pose     (template)
                                                                     │
                                                                     │ Joint Mapping
                                                                     v
-                                                                8 Solutions
+                                                                8 Candidate Slots
                                                                 (your robot)
 ```
 
 **Pipeline:**
 
-1. **Transform DH** (once per robot): Map the robot's Modified D-H parameters to a standard template structure using algebraic commutation rules of homogeneous transformation matrices.
+1. **Transform DH** (once per robot): After confirming equal joint types, joint count, and serial topology, evaluate the framework's D-H-level isomorphism criteria and map compatible Modified D-H representations using algebraic commutation rules. The accumulated twist state must remain at 0 or 180 degrees, and every axial offset must have a supported propagation path. Failure raises `UnsupportedDHTransformationError` and means that the target does not belong to the configuration family defined by the current template criteria.
 
-2. **Solve IK** (per target pose): Transform the target pose into the template's coordinate frame, solve the analytical IK (which only needs to be derived once for the template), then map the joint angles back.
+2. **Solve IK** (per target pose): Transform the target pose into the template's coordinate frame, invoke the analytical solver derived for that configuration template, then map the joint angles back. The current `solve_ik` implementation always invokes the Fanuc-template spherical-wrist solver.
 
-3. **Get all 8 configurations**: Front/Back x Up/Down x No-flip/Flip -- returned as a named dictionary.
+3. **Enumerate the current template's 8 theoretical configurations**: Front/Back x Up/Down x No-flip/Flip are returned as named dictionary slots; unreachable branches contain `NaN` rather than executable joint values. Other configuration solvers may use different branch counts and labels.
 
 ## Quick Start
 
@@ -70,7 +72,7 @@ target = np.eye(4)
 target[:3, 3] = [1000, 200, 800]
 target[:3, :3] = [[0, 0, 1], [0, 1, 0], [-1, 0, 0]]  # example orientation
 
-# Solve IK -- returns all 8 configurations
+# Solve IK -- returns 8 named candidate slots; unreachable branches are NaN
 solutions = solve_ik(target, template, robot)
 
 for name, joints in solutions.items():
@@ -129,7 +131,7 @@ Full list: `FUN`, `FUF`, `FDN`, `FDF`, `BUN`, `BUF`, `BDN`, `BDF`
 
 ## Supported Robots
 
-Any 6-DOF industrial robot with a spherical wrist (joints 4, 5, 6 axes intersect at a point). The following robots are included as examples:
+The current implementation supports 6-DOF spherical-wrist robots whose mechanical configuration matches the Fanuc template and whose Modified D-H pair satisfies the discrete alpha and d-offset conditions checked by `transform_dh`. The following compatible models are included and validated:
 
 | Robot | Manufacturer | Reach | Payload |
 |-------|-------------|-------|---------|
@@ -139,7 +141,7 @@ Any 6-DOF industrial robot with a spherical wrist (joints 4, 5, 6 axes intersect
 | GP12 | Yaskawa | 1440 mm | 12 kg |
 | ER8-720-MI | Estun | 720 mm | 8 kg |
 
-To add a new robot, create a JSON file with the Modified D-H parameters (7 entries: 6 joints + end-effector):
+To add a new model within the implemented Fanuc-template configuration family, create a JSON file with the Modified D-H parameters (7 entries: 6 joints + end-effector):
 
 ```json
 [
@@ -150,6 +152,8 @@ To add a new robot, create a JSON file with the Modified D-H parameters (7 entri
 ```
 
 Fields: `alpha` (deg), `a` (mm), `thetaOffset` (deg), `d` (mm), `thetaMin`/`thetaMax` (deg).
+
+For another mechanical configuration, including a UR-type non-spherical wrist, a JSON file is not enough. Add a configuration-specific template, derive and implement its analytical solver, define its branch and singularity conventions, provide solver dispatch, and validate the complete FK--IK--FK behavior for that family.
 
 ## Project Structure
 
@@ -174,10 +178,10 @@ dh-transform-ik/
 
 ### `solve_ik(target_pose, template_dh, robot_dh, transformed_dh=None)`
 
-High-level API. Solves IK in one call.
+High-level API for the currently implemented Fanuc-template 6R spherical-wrist family. It is not a generic solver-dispatch API.
 
 - **target_pose**: 4x4 numpy array (homogeneous transform, position in mm)
-- **template_dh**: Template robot DH parameters (from `load_robot`)
+- **template_dh**: Fanuc-configuration template D-H parameters used by the current solver (from `load_robot`)
 - **robot_dh**: Target robot DH parameters (from `load_robot`)
 - **transformed_dh**: Optional pre-computed transform (from `transform_dh`)
 - **Returns**: `dict` mapping config names to joint angle lists (radians)
@@ -188,11 +192,11 @@ Load robot DH parameters from a JSON file. Returns a list of `DHParam` objects.
 
 ### `transform_dh(template_dh, arbitrary_dh)`
 
-Transform arbitrary robot DH parameters to match the template structure. Returns a list of 8 `DHParam` objects (base + 6 joints + end-effector).
+Transform a target D-H representation to a same-configuration template structure. Returns a list of 8 `DHParam` objects (base + 6 joints + end-effector). Given matching joint types and serial topology, this function evaluates the framework's D-H-level isomorphism criteria. It does not determine whether an analytical solver has been implemented for a newly introduced template family.
 
 ### `inverse_kinematics(target_pose, dh_list)`
 
-Low-level analytical IK solver. Operates in template space.
+Low-level analytical IK solver for the Fanuc-template 6R spherical-wrist family. Operates in template space.
 
 ### `forward_kinematics_chain(dh_list, joint_angles_deg)`
 
@@ -210,6 +214,7 @@ uv run python tests/test_ik.py
 
 Expected output:
 ```
+
 --- DH Transform FK Preservation Test ---
   [PASS] Kuka KR50 R2500: mapped FK error = 5.69e-14
   [PASS] ABB IRB2600: mapped FK error = 5.37e-15
@@ -223,6 +228,38 @@ Expected output:
   [PASS] Yaskawa GP12: 100/100 passed
   [PASS] Estun ER8-720-MI: 100/100 passed
 ```
+
+## Chapter 2 Data Reproduction
+
+The dissertation experiments use fixed targets and preserve per-trial records under
+`data/chapter2/`. Run Python through `uv` from the repository root:
+
+```bash
+uv run python experiments/export_dh_tables.py
+uv run python experiments/run_dh_validation.py --trials 10000 --seed 42
+uv run python experiments/run_d_offset_validation.py --trials 1000 --seed 42
+uv run python experiments/generate_ik_targets.py --trials 10000 --seed 42
+uv run python experiments/run_ik_accuracy.py --seed 42
+uv run python experiments/run_ik_timing.py --warmup 1000 --trials 10000
+uv run python experiments/run_path_continuity.py --seed 42 --line-paths 10 --arc-paths 10 --points 100
+uv run python experiments/run_singularity.py --seed 42
+uv run --group benchmark python experiments/plot_path_results.py
+```
+
+The three Paper 1 numerical baselines require the legacy Robotics Toolbox API:
+
+```bash
+uv run --python 3.10 \
+  --with "roboticstoolbox-python==1.0.3" \
+  --with "spatialmath-python==1.0.5" \
+  --with "scipy==1.8.1" \
+  --with "numpy==1.23.5" \
+  python experiments/run_numerical_legacy.py --trials 10000
+uv run python experiments/summarize_numerical_legacy.py
+```
+
+These experiments use the program models `ABB IRB2600-20/1.65` and
+`Estun ER8-720-MI`; they do not represent ABB IRB6700 or Estun ER20.
 
 ## Requirements
 

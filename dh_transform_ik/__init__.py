@@ -1,12 +1,14 @@
-"""
-dh-transform-ik: A General Framework for Analytical Inverse Kinematics.
+"""General analytical IK framework based on D-H parameter templates.
 
-This package provides an analytical inverse kinematics solver that works for
-any 6-DOF industrial robot with a spherical wrist. Instead of writing a
-separate IK solver for each robot, you only need the robot's Modified D-H
-parameters -- the framework transforms them to a standard template and solves
-IK analytically, yielding all 8 configurations at ~200x the speed of numerical
-methods with machine-precision accuracy.
+The framework associates each mechanical configuration family with a D-H
+template and a separately derived analytical solver. This package currently
+implements only the 6R spherical-wrist family represented by the Fanuc LR Mate
+200iD template. Compatible same-configuration D-H representations can reuse
+that solver when they satisfy the framework's D-H-level isomorphism criteria.
+
+Other families, including UR-type non-spherical-wrist manipulators, require a
+configuration-specific template and solver. They are not implemented here, and
+passing another template to ``solve_ik`` does not select another solver.
 
 Quick Start:
     >>> import numpy as np
@@ -38,6 +40,7 @@ from .dh import (
     normalize_angle,
 )
 from .transform import (
+    UnsupportedDHTransformationError,
     transform_dh,
     transform_joints_all,
     transform_joints_single,
@@ -59,6 +62,7 @@ __all__ = [
     "forward_kinematics_mdh",
     "forward_kinematics_chain",
     # DH transformation (core contribution)
+    "UnsupportedDHTransformationError",
     "transform_dh",
     "transform_joints_all",
     "transform_joints_single",

@@ -1,11 +1,13 @@
-"""
-Analytical inverse kinematics solver for 6-DOF industrial robots.
+"""Analytical inverse kinematics for the Fanuc-template 6R configuration.
 
-This module provides a closed-form analytical IK solver that computes all 8
-possible joint configurations for a 6-DOF robot with a spherical wrist.
-The solver operates on the template robot's DH parameters, and the results
-can be mapped to any robot with the same configuration using the DH
-parameter transformation.
+This module provides a closed-form analytical IK solver that enumerates 8
+theoretical joint-configuration slots for a 6-DOF robot with a spherical wrist;
+unreachable branches are represented by NaN values.
+The solver operates on the Fanuc-template spherical-wrist geometry, and its
+results can be mapped to robots with the same mechanical configuration whose
+D-H representations satisfy the framework's D-H-level isomorphism criteria.
+It is not a solver for arbitrary 6R configurations. Other families require
+their own analytical equations, branch conventions, and dispatch mechanism.
 
 The 8 configurations correspond to all combinations of:
     - Front / Back      (shoulder: theta1)
@@ -70,10 +72,11 @@ def inverse_kinematics(
     target_pose: np.ndarray,
     dh_list: List[DHParam],
 ) -> Dict[str, List[float]]:
-    """Analytical inverse kinematics for 6-DOF robots with spherical wrist.
+    """Analytical IK for the Fanuc-template 6R spherical-wrist family.
 
-    Computes all 8 possible joint configurations using geometric and algebraic
-    methods. The solver uses the following approach:
+    Enumerates 8 theoretical joint configurations using geometric and algebraic
+    methods. Unreachable branches are represented by NaN values. The solver
+    uses the following approach:
         - Theta1: From base plane geometry (atan2)
         - Theta3: From the cosine law (elbow angle)
         - Theta2: From planar arm equations
@@ -344,9 +347,10 @@ def solve_ik(
     robot_dh: List[DHParam],
     transformed_dh: Optional[List[DHParam]] = None,
 ) -> Dict[str, List[float]]:
-    """High-level API: Solve inverse kinematics for any robot in one call.
+    """Solve IK for a robot compatible with the Fanuc-template configuration.
 
-    This function combines all three steps of the general IK framework:
+    This function combines the three framework steps for the one analytical
+    solver currently implemented in this package:
         1. Transform the robot's DH parameters to the template structure
         2. Transform the target pose to the template's base frame
         3. Solve analytical IK and map joints back to the robot's space
@@ -356,7 +360,7 @@ def solve_ik(
 
     Args:
         target_pose:    4x4 homogeneous transformation matrix. Position in mm.
-        template_dh:    Template robot DH parameters (7 entries).
+        template_dh:    Fanuc-configuration template D-H parameters (7 entries).
         robot_dh:       Target robot DH parameters (7 entries).
         transformed_dh: Pre-computed transformed DH (8 entries). If None,
                         it will be computed from template_dh and robot_dh.
@@ -364,6 +368,19 @@ def solve_ik(
     Returns:
         Dictionary mapping configuration names to joint angle lists (radians)
         in the **target robot's** joint space.
+
+    Raises:
+        UnsupportedDHTransformationError: If ``transformed_dh`` is not supplied
+            and the template/target D-H pair is outside the transformation
+            method's applicable conditions.
+
+    Note:
+        ``template_dh`` does not select an IK implementation. This function
+        always calls :func:`inverse_kinematics`, whose equations are specific
+        to the Fanuc-template 6R spherical-wrist family. ``transform_dh``
+        evaluates the D-H-level isomorphism criteria after joint types and
+        serial topology are known to match; it does not register or select a
+        solver for a newly introduced configuration family.
 
     Example:
         >>> from dh_transform_ik import load_robot, solve_ik

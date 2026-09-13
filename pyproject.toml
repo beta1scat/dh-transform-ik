@@ -1,7 +1,7 @@
 [project]
 name = "dh-transform-ik"
 version = "1.0.0"
-description = "A general framework for the analytical inverse kinematics solution of 6-DOF industrial robots"
+description = "A general analytical inverse kinematics framework based on D-H parameter templates"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
