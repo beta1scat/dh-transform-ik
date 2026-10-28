@@ -238,28 +238,27 @@ The dissertation experiments use fixed targets and preserve per-trial records un
 uv run python experiments/export_dh_tables.py
 uv run python experiments/run_dh_validation.py --trials 10000 --seed 42
 uv run python experiments/run_d_offset_validation.py --trials 1000 --seed 42
-uv run python experiments/generate_ik_targets.py --trials 10000 --seed 42
-uv run python experiments/run_ik_accuracy.py --seed 42
-uv run python experiments/run_ik_timing.py --warmup 1000 --trials 10000
 uv run python experiments/run_path_continuity.py --seed 42 --line-paths 10 --arc-paths 10 --points 100
 uv run python experiments/run_singularity.py --seed 42
 uv run --group benchmark python experiments/plot_path_results.py
 ```
 
-The three Paper 1 numerical baselines require the legacy Robotics Toolbox API:
-
-```bash
-uv run --python 3.10 \
-  --with "roboticstoolbox-python==1.0.3" \
-  --with "spatialmath-python==1.0.5" \
-  --with "scipy==1.8.1" \
-  --with "numpy==1.23.5" \
-  python experiments/run_numerical_legacy.py --trials 10000
-uv run python experiments/summarize_numerical_legacy.py
-```
-
 These experiments use the program models `ABB IRB2600-20/1.65` and
 `Estun ER8-720-MI`; they do not represent ABB IRB6700 or Estun ER20.
+
+## Unified chapter 2 IK recomputation
+
+The IK experiment uses one analytical/multi-start numerical runner to produce
+both the accuracy and timing tables. All four methods share target
+poses, physical joint limits, FK acceptance and complete-call timing. Numerical
+methods use a midpoint and up to nine random starts per target.
+
+The complete **uv-only** commands for target generation, a 200-target pilot,
+10,000 targets per robot, optional repeated seeds, and both LaTeX table exports are
+in [the runbook](experiments/IK_COMPARISON_RUNBOOK.md). The scripts record raw
+attempts, solver statuses, source hashes, dependency versions, CPU information and thread settings. The
+runbook includes Windows PowerShell migration commands. Generated data and results
+are ignored by Git and must be transferred separately.
 
 ## Requirements
 
