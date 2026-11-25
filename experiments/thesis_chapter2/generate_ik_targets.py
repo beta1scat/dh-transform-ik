@@ -1,20 +1,18 @@
 """Generate deterministic FK targets for the analytical IK experiments."""
 
+from experiments.thesis_chapter2.config import PROCESSED_DIR
+
 import argparse
 import csv
 from pathlib import Path
 
 import numpy as np
 
-try:
-    from common import DEFAULT_SEED, PROCESSED_DIR, PROJECT_ROOT, forward_kinematics
-except ImportError:  # Support ``python -m experiments.generate_ik_targets``.
-    from experiments.common import (
-        DEFAULT_SEED,
-        PROCESSED_DIR,
-        PROJECT_ROOT,
-        forward_kinematics,
-    )
+from experiments.common import (
+    DEFAULT_SEED,
+    PROJECT_ROOT,
+    forward_kinematics,
+)
 
 from dh_transform_ik import load_robot
 
@@ -35,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--trials", type=int, default=10_000, help="Targets per robot")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--margin", type=float, default=0.05, help="Joint-limit margin")
+    parser.add_argument("--margin", type=float, default=0.0, help="Joint-limit margin")
     parser.add_argument(
         "--output", type=Path, default=PROCESSED_DIR / "ik_targets.csv"
     )

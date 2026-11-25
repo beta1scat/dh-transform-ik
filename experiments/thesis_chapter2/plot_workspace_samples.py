@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from experiments.thesis_chapter2.config import PROCESSED_DIR
+
 import argparse
 import csv
 from pathlib import Path
@@ -11,10 +13,7 @@ import numpy as np
 from matplotlib.font_manager import FontProperties
 from matplotlib.offsetbox import AnchoredOffsetbox, HPacker, TextArea
 
-try:
-    from common import PROCESSED_DIR, PROJECT_ROOT
-except ImportError:
-    from experiments.common import PROCESSED_DIR, PROJECT_ROOT
+from experiments.common import PROJECT_ROOT
 
 
 def parse_args() -> argparse.Namespace:

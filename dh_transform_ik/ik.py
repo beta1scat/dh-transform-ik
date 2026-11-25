@@ -45,8 +45,7 @@ def _no_flip_to_flip(
 ) -> Tuple[float, float, float]:
     """Convert a no-flip wrist solution to its flip equivalent.
 
-    The wrist singularity gives two equivalent orientations:
-    the "no-flip" and "flip" solutions are related by adding/subtracting
+    The "no-flip" and "flip" solutions are related by adding/subtracting
     pi to theta4 and theta6, and negating theta5.
 
     Args:
@@ -68,9 +67,57 @@ def _no_flip_to_flip(
     return (t4, t5, t6)
 
 
+# Only numerically degenerate wrists have a free angle. Nearby nonsingular
+# targets retain their unique wrist decomposition instead of being approximated.
+WRIST_SINGULAR_TOLERANCE = 1e-10
+SHOULDER_AXIS_TOLERANCE_MM = 1e-9
+
+
+def _wrist_theta6(target_pose, dh_list, first_five):
+    """Recover the last joint from a specified first-five-joint transform."""
+    transform = np.eye(4, dtype=float)
+    for index, angle in enumerate(first_five):
+        dh = dh_list[index + 1]
+        transform = transform @ forward_kinematics_mdh(
+            dh.alpha, dh.a, dh.theta_offset, dh.d, math.degrees(angle)
+        )
+    relative_rotation = transform[:3, :3].T @ target_pose[:3, :3]
+    return atan2(-relative_rotation[2, 0], relative_rotation[0, 0])
+
+
+def _closest_coupled_wrist(q4, q6, slope, lower, upper, reference):
+    """Project a reference onto q6 = slope*q4 + offset (mod 2*pi).
+
+    All feasible turns of the coupling relation are considered. The objective
+    is actual joint displacement, so an extra full turn is not treated as free.
+    """
+    offset = q6 - slope * q4
+    possible = (offset + slope * lower[0], offset + slope * upper[0])
+    first = math.ceil((lower[1] - max(possible)) / (2 * pi) - 1e-12)
+    last = math.floor((upper[1] - min(possible)) / (2 * pi) + 1e-12)
+    candidates = []
+    for turn in range(first, last + 1):
+        intercept = offset + 2 * pi * turn
+        ends = sorted((slope * (lower[1] - intercept),
+                       slope * (upper[1] - intercept)))
+        left, right = max(lower[0], ends[0]), min(upper[0], ends[1])
+        if left > right:
+            continue
+        optimum = (reference[0] + slope * (reference[1] - intercept)) / 2.0
+        selected4 = min(max(optimum, left), right)
+        selected6 = slope * selected4 + intercept
+        cost = (selected4 - reference[0]) ** 2 + (selected6 - reference[1]) ** 2
+        candidates.append((cost, selected4, selected6))
+    if not candidates:
+        return None
+    _, selected4, selected6 = min(candidates)
+    return selected4, selected6
+
+
 def inverse_kinematics(
     target_pose: np.ndarray,
     dh_list: List[DHParam],
+    reference_q: Optional[List[float]] = None,
 ) -> Dict[str, List[float]]:
     """Analytical IK for the Fanuc-template 6R spherical-wrist family.
 
@@ -83,8 +130,9 @@ def inverse_kinematics(
         - Theta4, 5, 6: From rotation matrix decomposition
 
     Singularity handling:
-        - Wrist singularity (theta5 ~ 0): theta4 is set to 0, theta6 is
-          computed from the remaining rotation matrix.
+        - Numerically singular wrist: theta4 uses the reference (or zero),
+          and theta6 is recovered from the remaining rotation. solve_ik
+          subsequently resolves the coupled pair within actual joint limits.
         - Unreachable positions: NaN values are returned for those configs.
 
     Args:
@@ -92,6 +140,10 @@ def inverse_kinematics(
                      desired end-effector pose. Position in mm, rotation as 3x3.
         dh_list:     Transformed DH parameters (8 entries from ``transform_dh``).
                      Indices [1..6] are used for the 6 joints.
+        reference_q: Optional six-joint reference configuration in the
+                     transformed template space, in radians. It is used only
+                     to resolve the free angle at shoulder or wrist
+                     singularities; ordinary branches remain fully enumerated.
 
     Returns:
         Dictionary mapping configuration names to joint angle lists (radians).
@@ -104,6 +156,11 @@ def inverse_kinematics(
         ...     if not any(math.isnan(j) for j in joints):
         ...         print(f"{name}: {[round(math.degrees(j), 2) for j in joints]}")
     """
+    if reference_q is not None:
+        reference_q = np.asarray(reference_q, dtype=float)
+        if reference_q.shape != (6,) or not np.all(np.isfinite(reference_q)):
+            raise ValueError("reference_q must contain six finite joint angles in radians")
+
     # Extract link parameters from the transformed DH list.
     # The transformed list has 8 entries: [0]=base, [1..6]=joints, [7]=end.
     # The IK equations use the link lengths and offsets from joints 1-4.
@@ -137,7 +194,10 @@ def inverse_kinematics(
     # Front: theta1 = atan2(py, px)
     # Back:  theta1 = atan2(py, px) +/- pi
     # ------------------------------------------------------------------
-    t1_front = atan2(p_y, p_x)
+    if reference_q is not None and math.hypot(p_x, p_y) <= SHOULDER_AXIS_TOLERANCE_MM:
+        t1_front = normalize_angle(float(reference_q[0]))
+    else:
+        t1_front = atan2(p_y, p_x)
     if t1_front > 0:
         t1_back = t1_front - pi
     else:
@@ -223,8 +283,6 @@ def inverse_kinematics(
         s1, c1 = sin(theta1[idx]), cos(theta1[idx])
         s2, c2 = sin(theta2[idx]), cos(theta2[idx])
         s3, c3 = sin(theta3[idx]), cos(theta3[idx])
-        s23 = sin(theta2[idx] + theta3[idx])
-        c23 = cos(theta2[idx] + theta3[idx])
 
         # Elements from the rotation matrix equation
         cos_theta6 = (
@@ -248,59 +306,23 @@ def inverse_kinematics(
 
         cos_theta4 = (
             a_z * (c2 * c3 + s2 * s3)
-            - a_x * c1 * (c3 * s2 - c2 * s3)
-            + a_x * c1 * c3 * s2
-            - a_x * c1 * c2 * s3
-            + a_y * s1 * c3 * s2
-            - a_y * s1 * c2 * s3
-        )
-        # Simplify: cos_theta4 = a_z*c23 + (a_x*c1 + a_y*s1)*s23
-        # but keep original form for fidelity with the derivation
-        cos_theta4 = (
-            a_z * c23
-            - a_x * c1 * (-s23)
-            + a_x * c1 * s23
-            - a_y * s1 * (-s23)
-            + a_y * s1 * s23
-        )
-        # Use the correct simplified form from the original code:
-        cos_theta4 = (
-            a_z * (c2 * c3 + s2 * s3)
             - a_x * c1 * (c2 * s3 - c3 * s2)
             - a_y * s1 * (c2 * s3 - c3 * s2)
         )
         sin_theta4 = a_x * s1 - a_y * c1
 
-        # Wrist singularity check: when theta5 ~ 0, theta4 and theta6
-        # are coupled (gimbal lock). Set theta4 = 0 and compute theta6
-        # from the remaining rotation.
-        if abs(sin(theta5[idx])) <= 1e-5:
-            theta4[idx] = 0.0
-            # Compute FK chain from joint 1 to joint 5 to extract theta6.
-            # Use dh_list[1..5] (joints 1-5), NO base transform prepended
-            # because target_pose is already in the template space with
-            # base removed.
-            T05 = np.eye(4, dtype=np.float64)
-            joint_vals = [
-                theta1[idx],
-                theta2[idx],
-                theta3[idx],
-                theta4[idx],
-                theta5[idx],
-            ]
-            for j in range(5):
-                dh = dh_list[j + 1]  # dh_list[1..5]
-                t_deg = math.degrees(joint_vals[j])
-                T_j = forward_kinematics_mdh(
-                    dh.alpha, dh.a, dh.theta_offset, dh.d, t_deg
-                )
-                T05 = T05 @ T_j
-            # A56 = T05^-1 * target_pose
-            T05_inv = np.linalg.inv(T05)
-            A56 = T05_inv @ target_pose
-            cos6 = A56[0, 0]
-            sin6 = -A56[2, 0]
-            theta6[idx] = atan2(sin6, cos6)
+        # At numerical degeneracy choose a representative free angle.
+        # solve_ik subsequently resolves the pair using actual joint limits.
+        if abs(sin(theta5[idx])) <= WRIST_SINGULAR_TOLERANCE:
+            theta4[idx] = (
+                normalize_angle(float(reference_q[3]))
+                if reference_q is not None
+                else 0.0
+            )
+            theta6[idx] = _wrist_theta6(
+                target_pose, dh_list,
+                [theta1[idx], theta2[idx], theta3[idx], theta4[idx], theta5[idx]],
+            )
         else:
             theta4[idx] = atan2(
                 sin_theta4 / sin(theta5[idx]),
@@ -346,6 +368,7 @@ def solve_ik(
     template_dh: List[DHParam],
     robot_dh: List[DHParam],
     transformed_dh: Optional[List[DHParam]] = None,
+    reference_q: Optional[List[float]] = None,
 ) -> Dict[str, List[float]]:
     """Solve IK for a robot compatible with the Fanuc-template configuration.
 
@@ -364,6 +387,12 @@ def solve_ik(
         robot_dh:       Target robot DH parameters (7 entries).
         transformed_dh: Pre-computed transformed DH (8 entries). If None,
                         it will be computed from template_dh and robot_dh.
+        reference_q: Optional six-joint reference configuration in the target
+                     robot's joint space, in radians. It is internally mapped
+                     to template space and used only for singularity-aware
+                     candidate generation. At a singular wrist the q4/q6 pair
+                     is selected jointly within actual limits by minimizing
+                     squared joint displacement from this reference.
 
     Returns:
         Dictionary mapping configuration names to joint angle lists (radians)
@@ -416,13 +445,52 @@ def solve_ik(
     target_in_template = T_base_inv @ target_pose @ T_end_inv
 
     # Step 3: Solve IK in template space
-    std_solutions = inverse_kinematics(target_in_template, transformed_dh)
+    reference_q_template = None
+    if reference_q is not None:
+        reference_q = np.asarray(reference_q, dtype=float)
+        if reference_q.shape != (6,) or not np.all(np.isfinite(reference_q)):
+            raise ValueError("reference_q must contain six finite joint angles in radians")
+        reference_q_template = []
+        for index, value in enumerate(reference_q):
+            dh = transformed_dh[index + 1]
+            mapped = -value if not dh.is_co_orient else value
+            reference_q_template.append(
+                mapped - math.radians(dh.zero_offset)
+            )
+
+    std_solutions = inverse_kinematics(
+        target_in_template, transformed_dh, reference_q=reference_q_template
+    )
 
     # Step 4: Map joint angles back to the robot's joint space
     std_list = [std_solutions[name] for name in CONFIGS]
     arb_list = transform_joints_all(std_list, transformed_dh)
 
-    result = {}
-    for i, name in enumerate(CONFIGS):
-        result[name] = arb_list[i]
-    return result
+    # A singular wrist is a one-parameter family, not just q4 = reference[3].
+    # Resolve q4 and q6 together after mapping, in actual actuator coordinates.
+    lower = np.radians([robot_dh[i].theta_min for i in (3, 5)])
+    upper = np.radians([robot_dh[i].theta_max for i in (3, 5)])
+    for index, name in enumerate(CONFIGS):
+        standard = std_solutions[name]
+        if not np.all(np.isfinite(standard)):
+            continue
+        if abs(sin(standard[4])) > WRIST_SINGULAR_TOLERANCE:
+            continue
+        probe = list(standard[:5])
+        probe[3] += pi / 2
+        probe6 = _wrist_theta6(target_in_template, transformed_dh, probe)
+        template_slope = 1.0 if normalize_angle(probe6 - standard[5]) > 0 else -1.0
+        direction4 = 1.0 if transformed_dh[4].is_co_orient else -1.0
+        direction6 = 1.0 if transformed_dh[6].is_co_orient else -1.0
+        slope = template_slope * direction4 * direction6
+        current = arb_list[index]
+        reference = (reference_q[3], reference_q[5]) if reference_q is not None else (current[3], current[5])
+        pair = _closest_coupled_wrist(
+            current[3], current[5], slope, lower, upper, reference
+        )
+        if pair is None:
+            arb_list[index] = [float("nan")] * 6
+        else:
+            current[3], current[5] = pair
+
+    return {name: arb_list[index] for index, name in enumerate(CONFIGS)}

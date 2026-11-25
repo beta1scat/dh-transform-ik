@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from experiments.thesis_chapter2.config import PROCESSED_DIR
+
 import argparse
 import csv
 from collections import defaultdict
@@ -11,10 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.font_manager import FontProperties
 
-try:
-    from common import PROCESSED_DIR, PROJECT_ROOT
-except ImportError:
-    from experiments.common import PROCESSED_DIR, PROJECT_ROOT
+from experiments.common import PROJECT_ROOT
 
 
 def parse_args() -> argparse.Namespace:

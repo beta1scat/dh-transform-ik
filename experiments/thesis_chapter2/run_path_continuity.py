@@ -1,5 +1,7 @@
 """Run an offline Cartesian-path IK continuity experiment on Yaskawa GP12."""
 
+from experiments.thesis_chapter2.config import PROCESSED_DIR
+
 import argparse
 import csv
 import math
@@ -7,21 +9,22 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    from common import DEFAULT_SEED, PROCESSED_DIR, PROJECT_ROOT, forward_kinematics
-except ImportError:  # Support module execution from the repository root.
-    from experiments.common import (
-        DEFAULT_SEED,
-        PROCESSED_DIR,
-        PROJECT_ROOT,
-        forward_kinematics,
-    )
+from experiments.common import (
+    DEFAULT_SEED,
+    PROJECT_ROOT,
+    forward_kinematics,
+)
 
-from dh_transform_ik import CONFIGS, load_robot, solve_ik, transform_dh
+from dh_transform_ik import CONFIGS, load_robot, solve_ik, transform_dh, forward_kinematics_mdh
+from experiments.thesis_chapter2.ik_comparison_protocol import evaluate_solution, joint_limits_rad
 
 
 TOLERANCE = 1e-3
 Q_FIELDS = [f"q{i}_rad" for i in range(1, 7)]
+FAILURE_REASONS = (
+    "outside_arm_triangle_reach", "no_finite_candidate_requires_diagnosis",
+    "no_limit_valid_enumerated_candidate", "pose_tolerance",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,6 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--summary-output", type=Path, default=PROCESSED_DIR / "path_summary.csv"
     )
+    parser.add_argument("--branches-output", type=Path,
+                        default=PROCESSED_DIR / "path_branches.csv")
     return parser.parse_args()
 
 
@@ -88,20 +93,27 @@ def wrapped_delta(q: np.ndarray, reference: np.ndarray) -> np.ndarray:
     return np.arctan2(np.sin(difference), np.cos(difference))
 
 
-def within_limits(q_rad: np.ndarray, robot_dh) -> bool:
-    q_deg = np.degrees(q_rad)
-    return all(
-        robot_dh[i].theta_min - 1e-9 <= q_deg[i] <= robot_dh[i].theta_max + 1e-9
-        for i in range(6)
-    )
+def position_reach_margins(target, transformed):
+    """Necessary arm-triangle reach bounds in template coordinates, in mm.
 
-
-def pose_metrics(target: np.ndarray, actual: np.ndarray):
-    matrix_error = float(np.mean(np.abs(target - actual)))
-    position_error = float(np.linalg.norm(target[:3, 3] - actual[:3, 3]))
-    relative_rotation = target[:3, :3].T @ actual[:3, :3]
-    cosine = float(np.clip((np.trace(relative_rotation) - 1.0) / 2.0, -1.0, 1.0))
-    return matrix_error, position_error, math.degrees(math.acos(cosine))
+    Positive margins do not prove joint-limit or orientation feasibility.
+    Strictly negative front and back margins exclude both shoulder geometries.
+    """
+    def fixed_transform(dh):
+        return forward_kinematics_mdh(dh.alpha, dh.a, dh.theta_offset, dh.d, 0.0)
+    template_target = (np.linalg.inv(fixed_transform(transformed[0])) @ target
+                       @ np.linalg.inv(fixed_transform(transformed[7])))
+    x, y, z = template_target[:3, 3]
+    a1, a2 = abs(transformed[2].a), abs(transformed[3].a)
+    reach = math.hypot(abs(transformed[4].a), abs(transformed[4].d))
+    radial = math.hypot(x, y)
+    height = z - abs(transformed[1].d)
+    minimum, maximum = abs(a2 - reach), a2 + reach
+    margins = []
+    for offset in (radial - a1, radial + a1):
+        distance = math.hypot(offset, height)
+        margins.append(min(distance - minimum, maximum - distance))
+    return margins
 
 
 def main() -> None:
@@ -122,6 +134,8 @@ def main() -> None:
     transformed = transform_dh(template, robot_dh)
     args.trials_output.parent.mkdir(parents=True, exist_ok=True)
     args.summary_output.parent.mkdir(parents=True, exist_ok=True)
+    args.branches_output.parent.mkdir(parents=True, exist_ok=True)
+    lower, upper = joint_limits_rad(robot_dh)
 
     trial_fields = [
         "mode",
@@ -142,9 +156,21 @@ def main() -> None:
         "rotation_error_deg",
         "wrapped_step_distance_rad",
         "point_success",
+        "failure_reason",
+        "finite_candidate_count",
+        "limit_valid_candidate_count",
+        "front_reach_margin_mm",
+        "back_reach_margin_mm",
+        *[f"target_r{r}{c}" for r in range(3) for c in range(3)],
     ]
     summaries = []
-    with args.trials_output.open("w", newline="", encoding="utf-8") as stream:
+    branch_fields = ["path_id", "path_type", "point", "branch", "finite",
+                     "within_limits", "experiment_success", "failure_reason",
+                     "matrix_mean_error", "position_error_mm", "rotation_error_deg",
+                     *Q_FIELDS]
+    with args.trials_output.open("w", newline="", encoding="utf-8") as stream, args.branches_output.open("w", newline="", encoding="utf-8") as branch_stream:
+        branch_writer = csv.DictWriter(branch_stream, fieldnames=branch_fields)
+        branch_writer.writeheader()
         writer = csv.DictWriter(stream, fieldnames=trial_fields)
         writer.writeheader()
         path_specs = [("line", args.line_length_mm)] * args.line_paths + [
@@ -168,36 +194,49 @@ def main() -> None:
             branch_switches = 0
             previous_branch = ""
             distances = []
+            failure_counts = {reason: 0 for reason in FAILURE_REASONS}
+            first_failed_point = ""
 
             for point, target in enumerate(poses):
                 solutions = solve_ik(
-                    target, template, robot_dh, transformed_dh=transformed
+                    target, template, robot_dh, transformed_dh=transformed,
+                    reference_q=previous,
                 )
                 candidates = []
+                finite_count = limit_count = 0
                 for branch in CONFIGS:
-                    q_rad = np.asarray(solutions.get(branch, [math.nan] * 6), dtype=float)
-                    if q_rad.shape != (6,) or not np.all(np.isfinite(q_rad)):
-                        continue
-                    if not within_limits(q_rad, robot_dh):
-                        continue
-                    actual = np.asarray(
-                        forward_kinematics(robot_dh, np.degrees(q_rad)), dtype=float
-                    )
-                    error, position_error, rotation_error = pose_metrics(target, actual)
-                    if error < TOLERANCE:
+                    checked = evaluate_solution(solutions[branch], target, robot_dh,
+                                                lower, upper, TOLERANCE)
+                    finite_count += int(checked["finite"])
+                    limit_count += int(checked["within_limits"])
+                    branch_writer.writerow({"path_id": path_id, "path_type": kind,
+                                            "point": point, "branch": branch,
+                                            **{key: checked[key] for key in branch_fields
+                                               if key in checked}})
+                    if checked["experiment_success"]:
+                        q_rad = np.array([checked[key] for key in Q_FIELDS])
+                        actual = np.asarray(forward_kinematics(robot_dh, np.degrees(q_rad)))
                         distance = float(np.linalg.norm(wrapped_delta(q_rad, previous)))
-                        candidates.append(
-                            (
-                                distance,
-                                branch,
-                                q_rad,
-                                error,
-                                position_error,
-                                rotation_error,
-                                actual,
-                            )
-                        )
+                        candidates.append((distance, branch, q_rad,
+                                           checked["matrix_mean_error"],
+                                           checked["position_error_mm"],
+                                           checked["rotation_error_deg"], actual))
+                margins = position_reach_margins(target, transformed)
+                reason = ""
+                if not candidates:
+                    if max(margins) < -1e-7:
+                        reason = "outside_arm_triangle_reach"
+                    elif not finite_count:
+                        reason = "no_finite_candidate_requires_diagnosis"
+                    elif not limit_count:
+                        reason = "no_limit_valid_enumerated_candidate"
+                    else:
+                        reason = "pose_tolerance"
 
+                if reason:
+                    failure_counts[reason] += 1
+                    if first_failed_point == "":
+                        first_failed_point = point
                 output = {
                     "mode": "offline",
                     "path_id": path_id,
@@ -216,6 +255,13 @@ def main() -> None:
                     "rotation_error_deg": math.nan,
                     "wrapped_step_distance_rad": math.nan,
                     "point_success": False,
+                    "failure_reason": reason,
+                    "finite_candidate_count": finite_count,
+                    "limit_valid_candidate_count": limit_count,
+                    "front_reach_margin_mm": margins[0],
+                    "back_reach_margin_mm": margins[1],
+                    **{f"target_r{r}{c}": target[r, c]
+                       for r in range(3) for c in range(3)},
                 }
                 output.update({field: math.nan for field in Q_FIELDS})
                 if candidates:
@@ -258,6 +304,8 @@ def main() -> None:
                     "points": args.points,
                     "successful_points": successes,
                     "complete_path": successes == args.points,
+                    "first_failed_point": first_failed_point,
+                    **{f"failed_{reason}": count for reason, count in failure_counts.items()},
                     "branch_switches": branch_switches,
                     "mean_wrapped_step_rad": float(np.mean(distances))
                     if distances
@@ -273,6 +321,8 @@ def main() -> None:
         "points",
         "successful_points",
         "complete_path",
+        "first_failed_point",
+        *[f"failed_{reason}" for reason in FAILURE_REASONS],
         "branch_switches",
         "mean_wrapped_step_rad",
         "max_wrapped_step_rad",

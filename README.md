@@ -2,289 +2,168 @@
 
 **A General Framework for Analytical Inverse Kinematics Based on D-H Parameter Templates**
 
-The framework organizes analytical inverse kinematics by mechanical configuration. Each configuration family needs a D-H template and an analytical solver derived for that template; compatible target models can reuse the solver when their Modified D-H representations satisfy the framework's isomorphism criteria.
+This repository provides the Python implementation accompanying *A general framework for the analytical inverse kinematics solution of industrial robots*.
 
-This repository implements one such family: the 6R spherical-wrist configuration represented by the Fanuc LR Mate 200iD template. It does not contain a UR-type non-spherical-wrist solver or runtime template/solver dispatch. Extending the framework to a UR-type or another configuration requires a separate analytical derivation, implementation, and validation; supplying a different JSON template alone is not sufficient.
+The framework separates robot-specific Modified Denavit–Hartenberg (MDH) representations from configuration-specific analytical solvers. Compatible robot models are mapped to a common parameter template, allowing an analytical solver to be reused across robots in the same mechanical configuration family.
 
-## Key Results
+The implemented solver covers the 6R spherical-wrist family represented by the Fanuc LR Mate 200iD template. Extending the framework to another family requires its own template and analytical solver; changing the robot parameter file alone does not provide a solver for a different configuration.
 
-| Metric | This Method | Numerical (LM) |
-|--------|------------|-----------------|
-| Success rate | **100%** | 96-99% |
-| Mean error | **~1e-14** | ~1e-4 |
-| Speed | **~50 us/call** | ~5-10 ms/call |
-| Speedup | **~100-200x** | baseline |
-| Solutions returned | **8 named candidate slots**; unreachable branches are `NaN` | 1 config |
+## Features
 
-Run `uv run --group benchmark python examples/benchmark.py` to reproduce these results with actual measured values on your machine.
-
-### Accuracy (10,000 trials per robot)
-
-| Robot | Success Rate | Mean Error |
-|-------|-------------|------------|
-| Fanuc LR Mate 200iD | 10000/10000 | 2.1e-14 |
-| Kuka KR50 R2500 | 10000/10000 | 1.2e-13 |
-| ABB IRB2600-20/1.65 | 10000/10000 | 5.3e-14 |
-| Yaskawa GP12 | 10000/10000 | 6.4e-14 |
-| Estun ER8-720-MI | 10000/10000 | 2.5e-14 |
+- MDH parameter normalization and joint-variable mapping for compatible robot models.
+- Closed-form IK with eight named shoulder, elbow and wrist candidate slots.
+- Cached parameter transformations for repeated target poses.
+- Optional reference configurations for resolving singular joint freedoms.
+- FK consistency, IK accuracy and timing, wrist-singularity, and Cartesian-path experiments.
 
 ## How It Works
 
-```
-                    DH Transform                    Analytical IK
-                    (Algorithm 1)                   (closed-form)
-                                                    
-  Robot's MDH   ──────────────>  Template MDH  ──────────────>  8 Candidate Slots
-  Parameters         once           Space           per pose     (template)
-                                                                    │
-                                                                    │ Joint Mapping
-                                                                    v
-                                                                8 Candidate Slots
-                                                                (your robot)
-```
+1. **Normalize the robot model.** Establish compatibility in joint types, joint count and serial topology, then apply the MDH isomorphism criteria implemented by `transform_dh`.
+2. **Transform the target pose.** Remove the fixed base and terminal transforms to express the target in template coordinates.
+3. **Solve analytical IK.** Enumerate the shoulder, elbow and wrist branches of the template solver.
+4. **Map the joint solutions.** Convert the template joint variables to the target robot's direction and zero-offset conventions.
 
-**Pipeline:**
+Unsupported MDH transformations raise `UnsupportedDHTransformationError`. Candidate solutions must be checked against the target robot's joint limits and FK accuracy before use.
 
-1. **Transform DH** (once per robot): After confirming equal joint types, joint count, and serial topology, evaluate the framework's D-H-level isomorphism criteria and map compatible Modified D-H representations using algebraic commutation rules. The accumulated twist state must remain at 0 or 180 degrees, and every axial offset must have a supported propagation path. Failure raises `UnsupportedDHTransformationError` and means that the target does not belong to the configuration family defined by the current template criteria.
+## Installation
 
-2. **Solve IK** (per target pose): Transform the target pose into the template's coordinate frame, invoke the analytical solver derived for that configuration template, then map the joint angles back. The current `solve_ik` implementation always invokes the Fanuc-template spherical-wrist solver.
-
-3. **Enumerate the current template's 8 theoretical configurations**: Front/Back x Up/Down x No-flip/Flip are returned as named dictionary slots; unreachable branches contain `NaN` rather than executable joint values. Other configuration solvers may use different branch counts and labels.
-
-## Quick Start
+Requirements: Python 3.9 or later, uv, and NumPy. From the cloned repository:
 
 ```bash
-git clone https://github.com/your-username/dh-transform-ik.git
 cd dh-transform-ik
 uv sync
 ```
 
+The experiment runbook specifies a pinned Python 3.10 environment and additional numerical-IK dependencies for reproducible comparisons.
+
+## Quick Start
+
+### FK → IK → FK
+
+The following example constructs a target from a known joint configuration and computes its analytical candidates. Robot parameter files and FK inputs use degrees; IK outputs use radians. Positions are expressed in millimetres.
+
 ```python
 import numpy as np
-from dh_transform_ik import load_robot, solve_ik, forward_kinematics_chain
-
-# Load robots (template = Fanuc LR Mate 200iD)
-template = load_robot("robots/fanuc_lr_mate_200id.json")
-robot = load_robot("robots/kuka_kr50_r2500.json")
-
-# Define target pose (4x4 homogeneous matrix, position in mm)
-target = np.eye(4)
-target[:3, 3] = [1000, 200, 800]
-target[:3, :3] = [[0, 0, 1], [0, 1, 0], [-1, 0, 0]]  # example orientation
-
-# Solve IK -- returns 8 named candidate slots; unreachable branches are NaN
-solutions = solve_ik(target, template, robot)
-
-for name, joints in solutions.items():
-    if not any(np.isnan(joints)):
-        print(f"{name}: {np.round(np.degrees(joints), 2)}")
-```
-
-### FK -> IK Roundtrip
-
-```python
-import math
-from dh_transform_ik import forward_kinematics_chain, solve_ik, load_robot
+from dh_transform_ik import load_robot, forward_kinematics_chain, solve_ik
 
 template = load_robot("robots/fanuc_lr_mate_200id.json")
 robot = load_robot("robots/kuka_kr50_r2500.json")
 
-# Forward kinematics at a known configuration
-q_deg = [10, 20, 30, 40, 50, 60]
+q_deg = [(link.theta_min + link.theta_max) / 2 for link in robot[:6]]
 target = forward_kinematics_chain(robot, q_deg)
-
-# Solve IK
 solutions = solve_ik(target, template, robot)
 
-# Verify: FUN config should match the input
-q_fun = [math.degrees(j) for j in solutions["FUN"]]
-print(f"Input:  {q_deg}")
-print(f"Output: {[round(x, 6) for x in q_fun]}")
-# Input:  [10, 20, 30, 40, 50, 60]
-# Output: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+for branch, q_rad in solutions.items():
+    if not np.all(np.isfinite(q_rad)):
+        continue
+    reconstructed = forward_kinematics_chain(robot, np.degrees(q_rad).tolist())
+    error = np.mean(np.abs(target - reconstructed))
+    print(f"{branch}: q_deg={np.degrees(q_rad)}, matrix_error={error:.3e}")
 ```
 
-### Cache for Repeated Calls
+A finite candidate is not automatically a joint-limit-valid solution. The experiment utilities perform periodic-equivalence, actual-limit and FK acceptance checks consistently across analytical and numerical methods.
+
+### Cache the Parameter Transformation
 
 ```python
 from dh_transform_ik import transform_dh, solve_ik
 
-# Pre-compute the DH transformation (done once)
 transformed = transform_dh(template, robot)
-
-# Use cached transform for fast repeated IK calls
-for target in targets:
-    solutions = solve_ik(target, template, robot, transformed_dh=transformed)
+solutions = solve_ik(target, template, robot, transformed_dh=transformed)
 ```
+
+For repeated calls on the same robot model, reuse `transformed`.
+
+### Reference Configuration at Singularities
+
+```python
+reference_q = np.radians(q_deg)
+solutions = solve_ik(
+    target,
+    template,
+    robot,
+    transformed_dh=transformed,
+    reference_q=reference_q,
+)
+```
+
+`reference_q` contains six joint angles in the **target robot's joint coordinates**, in radians. For a sequence of targets it can be the previous accepted solution. It is not a required input for independent pose solving.
+
+At a numerically singular wrist, the solver jointly selects a coupled q4/q6 pair within their actual joint limits, minimizing squared joint displacement from the reference. At a shoulder-axis degeneracy, the reference supplies a representative q1. Non-singular poses retain their analytical branch decomposition. Reference-based singular selection does not by itself establish a continuous executable trajectory.
 
 ## Configuration Names
 
-The 8 IK configurations are named using a 3-letter code:
+| Position | Codes | Meaning |
+|---|---|---|
+| First | `F` / `B` | Front / Back shoulder branch |
+| Second | `U` / `D` | Up / Down elbow branch |
+| Third | `N` / `F` | No-flip / Flip wrist branch |
 
-| Code | Meaning |
-|------|---------|
-| **F** / **B** | **Front** / **Back** -- shoulder configuration (theta1 differs by pi) |
-| **U** / **D** | **Up** / **Down** -- elbow configuration (two theta3 solutions) |
-| **N** / **F** | **No-flip** / **Flip** -- wrist configuration (theta4/5/6 alternatives) |
+The eight slots are `FUN`, `FUF`, `FDN`, `FDF`, `BUN`, `BUF`, `BDN` and `BDF`.
+Branches that do not produce a candidate contain `NaN`. At singularities, multiple slots may represent coincident solutions; eight slots do not necessarily mean eight distinct feasible configurations.
 
-Full list: `FUN`, `FUF`, `FDN`, `FDF`, `BUN`, `BUF`, `BDN`, `BDF`
+## Robot Models
 
-## Supported Robots
+| Model | Parameter file |
+|---|---|
+| Fanuc LR Mate 200iD — template | `robots/fanuc_lr_mate_200id.json` |
+| Kuka KR 50 R2500 | `robots/kuka_kr50_r2500.json` |
+| ABB IRB2600-20/1.65 | `robots/abb_irb2600_20_165.json` |
+| Yaskawa GP12 | `robots/yaskawa_gp12.json` |
+| Estun ER8-720-MI | `robots/estun_er8_720mi.json` |
 
-The current implementation supports 6-DOF spherical-wrist robots whose mechanical configuration matches the Fanuc template and whose Modified D-H pair satisfies the discrete alpha and d-offset conditions checked by `transform_dh`. The following compatible models are included and validated:
+Each model contains six joint entries and one terminal fixed-transform entry. Parameter fields are:
 
-| Robot | Manufacturer | Reach | Payload |
-|-------|-------------|-------|---------|
-| LR Mate 200iD | Fanuc | 717 mm | 7 kg |
-| KR50 R2500 | Kuka | 2500 mm | 50 kg |
-| IRB2600-20/1.65 | ABB | 1650 mm | 20 kg |
-| GP12 | Yaskawa | 1440 mm | 12 kg |
-| ER8-720-MI | Estun | 720 mm | 8 kg |
+| Field | Meaning | Unit |
+|---|---|---|
+| `alpha` | Link twist | degrees |
+| `a` | Link length | mm |
+| `thetaOffset` | Fixed joint-angle offset | degrees |
+| `d` | Link offset | mm |
+| `thetaMin`, `thetaMax` | Joint-variable limits | degrees |
 
-To add a new model within the implemented Fanuc-template configuration family, create a JSON file with the Modified D-H parameters (7 entries: 6 joints + end-effector):
-
-```json
-[
-    {"i": 0, "d": 0, "a": 0, "alpha": 0, "thetaOffset": 0, "thetaMin": -170, "thetaMax": 170},
-    {"i": 1, "d": 0, "a": 50, "alpha": -90, "thetaOffset": -90, "thetaMin": -100, "thetaMax": 145},
-    ...
-]
-```
-
-Fields: `alpha` (deg), `a` (mm), `thetaOffset` (deg), `d` (mm), `thetaMin`/`thetaMax` (deg).
-
-For another mechanical configuration, including a UR-type non-spherical wrist, a JSON file is not enough. Add a configuration-specific template, derive and implement its analytical solver, define its branch and singularity conventions, provide solver dispatch, and validate the complete FK--IK--FK behavior for that family.
+The MDH convention is `Rx(alpha) Tx(a) Rz(thetaOffset + theta) Tz(d)`. A new model in the implemented family must satisfy the transformation criteria. Other families require separate analytical equations and branch definitions.
 
 ## Project Structure
 
-```
+```text
 dh-transform-ik/
-  pyproject.toml         # Project config & dependencies (uv)
   dh_transform_ik/
-    __init__.py          # Public API
-    dh.py                # DHParam class, FK, utilities
-    transform.py         # DH parameter transformation (Algorithm 1)
-    ik.py                # Analytical IK solver + high-level solve_ik()
-  robots/                # Robot DH parameter JSON files
-  examples/
-    basic_usage.py       # Simple IK solve + verification
-    all_robots.py        # All 5 robots demonstrated
-    benchmark.py         # Reproduce paper Tables 3 & 4 (+ numerical comparison)
+    dh.py                         # MDH parameters and forward kinematics
+    transform.py                  # Parameter normalization and joint mapping
+    ik.py                         # Analytical IK and singular candidate selection
+  robots/                         # Five robot parameter sets
+  experiments/
+    common/                       # Shared FK, metrics, model builder and IO
+    paper/                        # Paper reproduction entry and README
+    thesis_chapter2/              # Dissertation experiments and README
+  data/
+    paper/                        # Paper outputs (generated)
+    thesis_chapter2/              # Chapter 2 outputs (generated)
   tests/
-    test_ik.py           # FK -> IK -> FK roundtrip tests
+    test_singular_reference.py    # Singular-reference regression checks
+  pyproject.toml
+  LICENSE
 ```
 
-## API Reference
+## Experiments
 
-### `solve_ik(target_pose, template_dh, robot_dh, transformed_dh=None)`
+Experiment entry points and outputs are organized separately:
 
-High-level API for the currently implemented Fanuc-template 6R spherical-wrist family. It is not a generic solver-dispatch API.
+| Workflow | Documentation | Outputs |
+|---|---|---|
+| Paper method reproduction | [Paper README](experiments/paper/README.md) | `data/paper/` |
+| Dissertation Chapter 2 | [Chapter 2 README](experiments/thesis_chapter2/README.md) | `data/thesis_chapter2/` |
 
-- **target_pose**: 4x4 numpy array (homogeneous transform, position in mm)
-- **template_dh**: Fanuc-configuration template D-H parameters used by the current solver (from `load_robot`)
-- **robot_dh**: Target robot DH parameters (from `load_robot`)
-- **transformed_dh**: Optional pre-computed transform (from `transform_dh`)
-- **Returns**: `dict` mapping config names to joint angle lists (radians)
+Both workflows import the same `dh_transform_ik` implementation. Shared experiment utilities live in `experiments/common/`; sampling, acceptance, timing and report rules are specified by each workflow. Run entries as Python modules from the repository root, for example `uv run python -m experiments.paper.benchmark --analytical-only`.
 
-### `load_robot(json_path)`
+The paper workflow provides a pose-reconstruction benchmark with a single-call LM baseline. Chapter 2 provides full-range targets, joint-limit-aware acceptance, multi-start numerical baselines, singularity and path analysis. The two protocols have separate outputs and should be reported according to their documented definitions.
 
-Load robot DH parameters from a JSON file. Returns a list of `DHParam` objects.
-
-### `transform_dh(template_dh, arbitrary_dh)`
-
-Transform a target D-H representation to a same-configuration template structure. Returns a list of 8 `DHParam` objects (base + 6 joints + end-effector). Given matching joint types and serial topology, this function evaluates the framework's D-H-level isomorphism criteria. It does not determine whether an analytical solver has been implemented for a newly introduced template family.
-
-### `inverse_kinematics(target_pose, dh_list)`
-
-Low-level analytical IK solver for the Fanuc-template 6R spherical-wrist family. Operates in template space.
-
-### `forward_kinematics_chain(dh_list, joint_angles_deg)`
-
-Compute FK for a robot. Returns 4x4 homogeneous transform.
-
-### `CONFIGS`
-
-List of configuration names: `['FUN', 'FUF', 'FDN', 'FDF', 'BUN', 'BUF', 'BDN', 'BDF']`
-
-## Running Tests
-
-```bash
-uv run python tests/test_ik.py
-```
-
-Expected output:
-```
-
---- DH Transform FK Preservation Test ---
-  [PASS] Kuka KR50 R2500: mapped FK error = 5.69e-14
-  [PASS] ABB IRB2600: mapped FK error = 5.37e-15
-  [PASS] Yaskawa GP12: mapped FK error = 7.16e-15
-  [PASS] Estun ER8-720-MI: mapped FK error = 2.73e-15
-
---- FK -> IK -> FK Roundtrip Tests (100 random configs each) ---
-  [PASS] Fanuc LR Mate 200iD (template): 100/100 passed
-  [PASS] Kuka KR50 R2500: 100/100 passed
-  [PASS] ABB IRB2600: 100/100 passed
-  [PASS] Yaskawa GP12: 100/100 passed
-  [PASS] Estun ER8-720-MI: 100/100 passed
-```
-
-## Chapter 2 Data Reproduction
-
-The dissertation experiments use fixed targets and preserve per-trial records under
-`data/chapter2/`. Run Python through `uv` from the repository root:
-
-```bash
-uv run python experiments/export_dh_tables.py
-uv run python experiments/run_dh_validation.py --trials 10000 --seed 42
-uv run python experiments/run_d_offset_validation.py --trials 1000 --seed 42
-uv run python experiments/run_path_continuity.py --seed 42 --line-paths 10 --arc-paths 10 --points 100
-uv run python experiments/run_singularity.py --seed 42
-uv run --group benchmark python experiments/plot_path_results.py
-```
-
-These experiments use the program models `ABB IRB2600-20/1.65` and
-`Estun ER8-720-MI`; they do not represent ABB IRB6700 or Estun ER20.
-
-## Unified chapter 2 IK recomputation
-
-The IK experiment uses one analytical/multi-start numerical runner to produce
-both the accuracy and timing tables. All four methods share target
-poses, physical joint limits, FK acceptance and complete-call timing. Numerical
-methods use a midpoint and up to nine random starts per target.
-
-The complete **uv-only** commands for target generation, a 200-target pilot,
-10,000 targets per robot, optional repeated seeds, and both LaTeX table exports are
-in [the runbook](experiments/IK_COMPARISON_RUNBOOK.md). The scripts record raw
-attempts, solver statuses, source hashes, dependency versions, CPU information and thread settings. The
-runbook includes Windows PowerShell migration commands. Generated data and results
-are ignored by Git and must be transferred separately.
-
-## Requirements
-
-- Python 3.9+
-- [uv](https://docs.astral.sh/uv/) (recommended package manager)
-- NumPy (installed automatically by `uv sync`)
-
-### Running Examples
-
-```bash
-# Basic usage
-uv run python examples/basic_usage.py
-
-# All robots demo
-uv run python examples/all_robots.py
-
-# Benchmark (analytical only)
-uv run python examples/benchmark.py
-
-# Benchmark with numerical comparison (installs roboticstoolbox)
-uv run --group benchmark python examples/benchmark.py
-```
+Measured results depend on the implementation, protocol and platform. Generated datasets and results are ignored by Git and must be transferred separately when needed.
 
 ## Citation
 
-If you use this code in your research, please cite:
+If this code is used in research, please cite:
 
 ```bibtex
 @article{niu2025general,
@@ -294,11 +173,10 @@ If you use this code in your research, please cite:
   volume={239},
   number={12},
   pages={4499--4511},
-  year={2025},
-  publisher={SAGE Publications Sage UK: London, England}
+  year={2025}
 }
 ```
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE).

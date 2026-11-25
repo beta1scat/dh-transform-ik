@@ -1,10 +1,12 @@
 """Run analytical and multi-start numerical IK under one acceptance protocol.
 
-Run from the project root with ``python -m experiments.run_ik_comparison``.
+Run from the project root with ``python -m experiments.thesis_chapter2.run_ik_comparison``.
 Output directories must be new, so previous measurements are never overwritten.
 """
 
 from __future__ import annotations
+
+from experiments.thesis_chapter2.config import PROCESSED_DIR
 
 import argparse
 import csv
@@ -24,13 +26,13 @@ from spatialmath import SE3
 
 from dh_transform_ik import CONFIGS, load_robot, solve_ik, transform_dh
 from experiments.common import (
-    PROJECT_ROOT, PROCESSED_DIR, file_sha256, forward_kinematics,
+    PROJECT_ROOT, file_sha256, forward_kinematics,
     git_commit, git_worktree_dirty, write_csv, write_json,
 )
-from experiments.ik_comparison_protocol import (
+from experiments.thesis_chapter2.ik_comparison_protocol import (
     evaluate_solution, initial_guesses, joint_limits_rad,
 )
-from experiments.ik_robot_models import ROBOT_FILES, METHODS, T_FIELDS, build_rtb_robot
+from experiments.thesis_chapter2.ik_robot_models import ROBOT_FILES, METHODS, T_FIELDS, build_rtb_robot
 
 METHOD_ORDER = ("analytical", *METHODS)
 METRIC_FIELDS = (
@@ -173,7 +175,9 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=False)
     source_paths = [
         Path(__file__), Path(__file__).with_name("ik_comparison_protocol.py"),
-        Path(__file__).with_name("common.py"), Path(__file__).with_name("ik_robot_models.py"),
+        PROJECT_ROOT / "experiments" / "common" / "__init__.py",
+        PROJECT_ROOT / "experiments" / "common" / "rtb_models.py",
+        Path(__file__).with_name("config.py"), Path(__file__).with_name("ik_robot_models.py"),
         *(PROJECT_ROOT / "dh_transform_ik" / name for name in ("dh.py", "transform.py", "ik.py")),
         *(PROJECT_ROOT / "robots" / name for name in (*ROBOT_FILES.values(), "fanuc_lr_mate_200id.json")),
     ]

@@ -2,36 +2,24 @@
 
 from __future__ import annotations
 
+from experiments.thesis_chapter2.config import PROCESSED_DIR
+
 import argparse
 import copy
 import random
 
 import numpy as np
 
-try:
-    from common import (
-        DEFAULT_SEED,
-        PROCESSED_DIR,
-        TEMPLATE_ROBOT,
-        forward_kinematics,
-        map_arbitrary_to_standard_deg,
-        pose_errors,
-        sample_joint_angles,
-        transformed_forward_kinematics,
-        write_csv,
-    )
-except ImportError:
-    from experiments.common import (
-        DEFAULT_SEED,
-        PROCESSED_DIR,
-        TEMPLATE_ROBOT,
-        forward_kinematics,
-        map_arbitrary_to_standard_deg,
-        pose_errors,
-        sample_joint_angles,
-        transformed_forward_kinematics,
-        write_csv,
-    )
+from experiments.common import (
+    DEFAULT_SEED,
+    TEMPLATE_ROBOT,
+    forward_kinematics,
+    map_arbitrary_to_standard_deg,
+    pose_errors,
+    sample_joint_angles,
+    transformed_forward_kinematics,
+    write_csv,
+)
 
 from dh_transform_ik import load_robot, transform_dh
 

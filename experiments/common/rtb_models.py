@@ -1,21 +1,8 @@
-"""Robot registry and metre-based toolbox model for the unified IK experiment."""
-
+"""Metre-based Robotics Toolbox model corresponding to the original MDH chain."""
 import math
-
 import roboticstoolbox as rtb
 from spatialmath import SE3
-
 from dh_transform_ik import forward_kinematics_mdh
-
-
-ROBOT_FILES = {
-    "abb_irb2600_20_165": "abb_irb2600_20_165.json",
-    "estun_er8_720mi": "estun_er8_720mi.json",
-    "kuka_kr50_r2500": "kuka_kr50_r2500.json",
-    "yaskawa_gp12": "yaskawa_gp12.json",
-}
-METHODS = ("ikine_min", "ikine_LM", "ikine_LMS")
-T_FIELDS = [f"target_{row}{column}" for row in range(4) for column in range(4)]
 
 
 def build_rtb_robot(dh_list):

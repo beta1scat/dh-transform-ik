@@ -2,24 +2,19 @@
 
 from __future__ import annotations
 
+from experiments.thesis_chapter2.config import PROCESSED_DIR
+
 import argparse
 import random
-import sys
-from pathlib import Path
 from typing import Any, Dict, List, Sequence
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
 
 from dh_transform_ik import load_robot, transform_dh
 from experiments.common import (
     DEFAULT_SEED,
+    JOINT_LIMIT_MARGIN,
     JOINT_COUNT,
-    PROCESSED_DIR,
     ROBOT_REGISTRY,
     TEMPLATE_ROBOT,
     forward_kinematics,
@@ -53,9 +48,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trials", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--margin", type=float, default=JOINT_LIMIT_MARGIN,
+                        help="Fraction excluded at each joint-limit end")
     args = parser.parse_args()
     if args.trials <= 0:
         parser.error("--trials must be a positive integer")
+    if not 0.0 <= args.margin < 0.5:
+        parser.error("--margin must be in [0, 0.5)")
     return args
 
 
@@ -73,7 +72,7 @@ def main() -> None:
         metrics: Dict[str, List[float]] = {field: [] for field in ERROR_FIELDS}
 
         for trial in range(1, args.trials + 1):
-            arbitrary_joints = sample_joint_angles(robot_dh, rng)
+            arbitrary_joints = sample_joint_angles(robot_dh, rng, args.margin)
             standard_joints = map_arbitrary_to_standard_deg(
                 arbitrary_joints, transformed_dh
             )

@@ -32,8 +32,5 @@ htmlcov/
 # OpenCode
 .opencode/
 
-# Generated datasets and experiment results; keep the data guide in Git.
-/data/*
-!/data/chapter2/
-/data/chapter2/*
-!/data/chapter2/README.md
+# Generated datasets and experiment results.
+/data/

@@ -1,4 +1,4 @@
-"""Shared paths and numerical helpers for the chapter 2 experiments."""
+"""Shared robot data, forward kinematics, metrics and provenance helpers."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import Any, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -26,23 +26,17 @@ from dh_transform_ik import (  # noqa: E402
 )
 
 ROBOTS_DIR = PROJECT_ROOT / "robots"
-DATA_DIR = PROJECT_ROOT / "data" / "chapter2"
-METADATA_DIR = DATA_DIR / "metadata"
-PROCESSED_DIR = DATA_DIR / "processed"
 
 DEFAULT_SEED = 42
-JOINT_LIMIT_MARGIN = 0.05
+JOINT_LIMIT_MARGIN = 0.0
 JOINT_COUNT = 6
 
 
 @dataclass(frozen=True)
 class RobotSpec:
     robot_id: str
-    manufacturer: str
-    model: str
     display_name: str
     filename: str
-    is_template: bool = False
 
     @property
     def source_path(self) -> Path:
@@ -54,42 +48,11 @@ class RobotSpec:
 
 
 ROBOT_REGISTRY: Sequence[RobotSpec] = (
-    RobotSpec(
-        "fanuc_lr_mate_200id",
-        "FANUC",
-        "LR Mate 200iD",
-        "FANUC LR Mate 200iD",
-        "fanuc_lr_mate_200id.json",
-        True,
-    ),
-    RobotSpec(
-        "kuka_kr50_r2500",
-        "KUKA",
-        "KR 50 R2500",
-        "KUKA KR 50 R2500",
-        "kuka_kr50_r2500.json",
-    ),
-    RobotSpec(
-        "abb_irb2600_20_165",
-        "ABB",
-        "IRB 2600-20/1.65",
-        "ABB IRB 2600-20/1.65",
-        "abb_irb2600_20_165.json",
-    ),
-    RobotSpec(
-        "yaskawa_gp12",
-        "Yaskawa",
-        "GP12",
-        "Yaskawa GP12",
-        "yaskawa_gp12.json",
-    ),
-    RobotSpec(
-        "estun_er8_720mi",
-        "ESTUN",
-        "ER8-720-MI",
-        "ESTUN ER8-720-MI",
-        "estun_er8_720mi.json",
-    ),
+    RobotSpec("fanuc_lr_mate_200id", "FANUC LR Mate 200iD", "fanuc_lr_mate_200id.json"),
+    RobotSpec("kuka_kr50_r2500", "KUKA KR 50 R2500", "kuka_kr50_r2500.json"),
+    RobotSpec("abb_irb2600_20_165", "ABB IRB 2600-20/1.65", "abb_irb2600_20_165.json"),
+    RobotSpec("yaskawa_gp12", "Yaskawa GP12", "yaskawa_gp12.json"),
+    RobotSpec("estun_er8_720mi", "ESTUN ER8-720-MI", "estun_er8_720mi.json"),
 )
 TEMPLATE_ROBOT = ROBOT_REGISTRY[0]
 
@@ -111,12 +74,14 @@ class PoseErrors:
 
 
 def sample_joint_angles(
-    dh_list: Sequence[DHParam], rng: random.Random
+    dh_list: Sequence[DHParam], rng: random.Random, margin_fraction: float = JOINT_LIMIT_MARGIN
 ) -> List[float]:
-    """Sample six joints in degrees, excluding 5% at each limit boundary."""
+    """Sample six joints in degrees with a configurable limit margin."""
+    if not 0.0 <= margin_fraction < 0.5:
+        raise ValueError("margin_fraction must be in [0, 0.5)")
     angles: List[float] = []
     for dh in dh_list[:JOINT_COUNT]:
-        margin = (dh.theta_max - dh.theta_min) * JOINT_LIMIT_MARGIN
+        margin = (dh.theta_max - dh.theta_min) * margin_fraction
         angles.append(rng.uniform(dh.theta_min + margin, dh.theta_max - margin))
     return angles
 

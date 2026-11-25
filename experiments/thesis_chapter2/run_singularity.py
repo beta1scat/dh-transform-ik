@@ -1,5 +1,7 @@
 """Evaluate analytical IK behavior around the Yaskawa wrist singularity."""
 
+from experiments.thesis_chapter2.config import PROCESSED_DIR
+
 import argparse
 import csv
 import math
@@ -8,17 +10,14 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    from common import DEFAULT_SEED, PROCESSED_DIR, PROJECT_ROOT, forward_kinematics
-except ImportError:  # Support module execution from the repository root.
-    from experiments.common import (
-        DEFAULT_SEED,
-        PROCESSED_DIR,
-        PROJECT_ROOT,
-        forward_kinematics,
-    )
+from experiments.common import (
+    DEFAULT_SEED,
+    PROJECT_ROOT,
+    forward_kinematics,
+)
 
 from dh_transform_ik import CONFIGS, load_robot, solve_ik, transform_dh
+from experiments.thesis_chapter2.ik_comparison_protocol import evaluate_solution, joint_limits_rad
 
 
 TOLERANCE = 1e-3
@@ -28,7 +27,11 @@ SINGULAR_VALUES = (
     -1e-4,
     -1e-5,
     -1e-6,
+    -1e-9,
+    -1e-11,
     0.0,
+    1e-11,
+    1e-9,
     1e-6,
     1e-5,
     1e-4,
@@ -38,6 +41,7 @@ SINGULAR_VALUES = (
 Q_FIELDS = [f"q{i}_rad" for i in range(1, 7)]
 REFERENCE_DELTA_FIELDS = [f"reference_delta_q{i}_rad" for i in range(1, 7)]
 PREVIOUS_DELTA_FIELDS = [f"previous_delta_q{i}_rad" for i in range(1, 7)]
+SOLVER_REFERENCE_FIELDS = [f"solver_reference_q{i}_rad" for i in range(1, 7)]
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +49,8 @@ def parse_args() -> argparse.Namespace:
         description="Yaskawa GP12 analytical IK wrist-singularity study."
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--reference-mode", choices=("nominal", "previous"),
+                        default="previous", help="No reference, or previous accepted solution")
     parser.add_argument(
         "--trials-output",
         type=Path,
@@ -76,14 +82,6 @@ def pose_metrics(target: np.ndarray, actual: np.ndarray):
     )
 
 
-def within_limits(q_rad: np.ndarray, robot_dh) -> bool:
-    q_deg = np.degrees(q_rad)
-    return all(
-        robot_dh[i].theta_min - 1e-9 <= q_deg[i] <= robot_dh[i].theta_max + 1e-9
-        for i in range(6)
-    )
-
-
 def reference_configuration(robot_dh, rng: np.random.Generator) -> np.ndarray:
     lower = np.array([item.theta_min for item in robot_dh[:6]], dtype=float)
     upper = np.array([item.theta_max for item in robot_dh[:6]], dtype=float)
@@ -100,12 +98,18 @@ def main() -> None:
     robot_dh = load_robot(str(PROJECT_ROOT / "robots" / "yaskawa_gp12.json"))
     transformed = transform_dh(template, robot_dh)
     base_q = reference_configuration(robot_dh, rng)
+    lower, upper = joint_limits_rad(robot_dh)
+    solver_reference = (lower + upper) / 2.0
     args.trials_output.parent.mkdir(parents=True, exist_ok=True)
     args.summary_output.parent.mkdir(parents=True, exist_ok=True)
 
     trial_fields = [
+        "reference_mode",
         "q5_target_rad",
         "branch",
+        "experiment_success",
+        "failure_reason",
+        *SOLVER_REFERENCE_FIELDS,
         *Q_FIELDS,
         "finite",
         "within_limits",
@@ -121,7 +125,7 @@ def main() -> None:
     ]
     previous_by_branch = {}
     summaries = defaultdict(
-        lambda: {"finite": 0, "limited": 0, "passed": 0, "jumps": [], "errors": []}
+        lambda: {"finite": 0, "limited": 0, "passed": 0, "effective": 0, "jumps": [], "errors": []}
     )
     with args.trials_output.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=trial_fields)
@@ -133,12 +137,18 @@ def main() -> None:
                 forward_kinematics(robot_dh, np.degrees(reference_q)), dtype=float
             )
             solutions = solve_ik(
-                target, template, robot_dh, transformed_dh=transformed
+                target, template, robot_dh, transformed_dh=transformed,
+                reference_q=solver_reference if args.reference_mode == "previous" else None,
             )
+            accepted = []
             for branch in CONFIGS:
                 q_rad = np.asarray(solutions.get(branch, [math.nan] * 6), dtype=float)
-                finite = q_rad.shape == (6,) and bool(np.all(np.isfinite(q_rad)))
-                limited = finite and within_limits(q_rad, robot_dh)
+                checked = evaluate_solution(q_rad, target, robot_dh, lower, upper, TOLERANCE)
+                q_rad = np.array([checked[name] for name in Q_FIELDS])
+                finite = checked["finite"]
+                limited = checked["within_limits"]
+                if checked["experiment_success"]:
+                    accepted.append(q_rad)
                 metrics = (math.nan, math.nan, math.nan, math.nan)
                 reference_delta = np.full(6, math.nan)
                 previous_delta = np.full(6, math.nan)
@@ -155,17 +165,21 @@ def main() -> None:
                         previous_delta = wrapped_delta(q_rad, previous_by_branch[branch])
                         previous_jump = float(np.linalg.norm(previous_delta))
                     previous_by_branch[branch] = q_rad
-                passed = finite and metrics[0] < TOLERANCE
+                passed = finite and metrics[0] <= TOLERANCE
                 item = summaries[q5_value]
                 item["finite"] += int(finite)
                 item["limited"] += int(limited)
                 item["passed"] += int(passed)
+                item["effective"] += int(checked["experiment_success"])
                 if passed:
                     item["errors"].append(metrics[0])
                 if math.isfinite(previous_jump):
                     item["jumps"].append(previous_jump)
 
                 output = {
+                    "reference_mode": args.reference_mode,
+                    "experiment_success": checked["experiment_success"],
+                    "failure_reason": checked["failure_reason"],
                     "q5_target_rad": q5_value,
                     "branch": branch,
                     "finite": finite,
@@ -179,6 +193,10 @@ def main() -> None:
                     "previous_jump_rad": previous_jump,
                 }
                 output.update({name: q_rad[i] for i, name in enumerate(Q_FIELDS)})
+                output.update({
+                    name: float(solver_reference[i]) if args.reference_mode == "previous" else math.nan
+                    for i, name in enumerate(SOLVER_REFERENCE_FIELDS)
+                })
                 output.update(
                     {
                         name: reference_delta[i]
@@ -192,9 +210,15 @@ def main() -> None:
                     }
                 )
                 writer.writerow(output)
+            if accepted:
+                solver_reference = min(
+                    accepted, key=lambda q: float(np.linalg.norm(q - solver_reference))
+                ).copy()
 
     summary_fields = [
+        "reference_mode",
         "q5_target_rad",
+        "effective_branches",
         "branches",
         "finite_branches",
         "within_limit_branches",
@@ -211,6 +235,8 @@ def main() -> None:
             item = summaries[q5_value]
             writer.writerow(
                 {
+                    "reference_mode": args.reference_mode,
+                    "effective_branches": item["effective"],
                     "q5_target_rad": q5_value,
                     "branches": len(CONFIGS),
                     "finite_branches": item["finite"],
